@@ -1,75 +1,44 @@
+// /pages/api/validate-coupon.js  (or /app/api/validate-coupon/route.js for App Router)
 import fetch from "node-fetch";
 
 export default async function handler(req, res) {
-  if (req.method !== "POST")
-    return res.status(405).json({ error: "Method not allowed" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ valid: false, message: "Method not allowed" });
+  }
 
   const { code } = req.body;
   if (!code) return res.status(400).json({ valid: false, message: "No coupon provided" });
 
+  // Use environment variables
+  const SHOP = process.env.SHOP_NAME;                 // "eiser-ecom.myshopify.com"
+  const ADMIN_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN; // Admin API token with read_price_rules
+
+  if (!SHOP || !ADMIN_TOKEN) {
+    return res.status(500).json({ valid: false, message: "Server misconfiguration" });
+  }
+
   try {
-    const endpoint = process.env.STOREFRONT_API_ENDPOINT;
-    const token = process.env.STOREFRONT_API_TOKEN;
+    const url = `https://${SHOP}/admin/api/2025-10/discount_codes/lookup.json?code=${encodeURIComponent(code)}`;
 
-    const query = `
-      mutation checkoutCreate($discountCode: String!) {
-        checkoutCreate(input: {
-          lineItems: [],
-          discountCode: $discountCode
-        }) {
-          checkout {
-            discountApplications(first: 5) {
-              edges {
-                node {
-                  ... on DiscountCodeApplication {
-                    code
-                    applicable
-                  }
-                }
-              }
-            }
-          }
-          checkoutUserErrors {
-            message
-          }
-        }
-      }
-    `;
-
-    const shopifyRes = await fetch(endpoint, {
-      method: "POST",
+    const apiRes = await fetch(url, {
+      method: "GET",
       headers: {
-        "X-Shopify-Storefront-Access-Token": token,
-        "Content-Type": "application/json"
+        "X-Shopify-Access-Token": ADMIN_TOKEN,
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        query,
-        variables: { discountCode: code }
-      })
     });
 
-    const data = await shopifyRes.json();
-
-    if (data.errors) {
-      console.error("GraphQL Error:", data.errors);
-      return res.status(500).json({ valid: false, message: "Shopify API error" });
-    }
-
-    const errors = data.data?.checkoutCreate?.checkoutUserErrors;
-    if (errors && errors.length > 0) {
-      return res.json({ valid: false, message: errors[0].message });
-    }
-
-    const apps = data.data?.checkoutCreate?.checkout?.discountApplications?.edges;
-
-    if (apps && apps.length > 0 && apps[0].node.applicable) {
-      return res.json({ valid: true, discount: apps[0].node });
+    if (apiRes.status === 200) {
+      const data = await apiRes.json();
+      return res.status(200).json({ valid: true, discount: data });
+    } else if (apiRes.status === 404) {
+      return res.status(200).json({ valid: false, message: "Discount code not found" });
     } else {
-      return res.json({ valid: false, message: "Invalid coupon" });
+      const text = await apiRes.text();
+      return res.status(apiRes.status).json({ valid: false, message: text });
     }
-
   } catch (err) {
-    console.error("SERVER ERROR:", err);
-    res.status(500).json({ valid: false, message: "Server error" });
+    console.error("Server error:", err);
+    return res.status(500).json({ valid: false, message: "Server error" });
   }
 }
