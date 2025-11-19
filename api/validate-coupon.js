@@ -1,76 +1,75 @@
 import fetch from "node-fetch";
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (req.method !== "POST")
+    return res.status(405).json({ error: "Method not allowed" });
 
   const { code } = req.body;
   if (!code) return res.status(400).json({ valid: false, message: "No coupon provided" });
 
   try {
-    // Call Storefront API using GraphQL
+    const endpoint = process.env.STOREFRONT_API_ENDPOINT;
+    const token = process.env.STOREFRONT_API_TOKEN;
+
     const query = `
-      mutation checkoutCreate($input: CheckoutCreateInput!) {
-        checkoutCreate(input: $input) {
+      mutation checkoutCreate($discountCode: String!) {
+        checkoutCreate(input: {
+          lineItems: [],
+          discountCode: $discountCode
+        }) {
           checkout {
-            id
-            discountApplications(first: 10) {
+            discountApplications(first: 5) {
               edges {
                 node {
                   ... on DiscountCodeApplication {
                     code
-                    value {
-                      ... on MoneyV2 {
-                        amount
-                        currencyCode
-                      }
-                    }
+                    applicable
                   }
                 }
               }
             }
           }
-          userErrors {
-            field
+          checkoutUserErrors {
             message
           }
         }
       }
     `;
 
-    const variables = {
-      input: {
-        lineItems: [],
-        discountCode: code
-      }
-    };
-
-    const response = await fetch(`https://${process.env.SHOPIFY_STORE_DOMAIN}/api/2025-10/graphql.json`, {
+    const shopifyRes = await fetch(endpoint, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Storefront-Access-Token": process.env.SHOPIFY_STOREFRONT_TOKEN
+        "X-Shopify-Storefront-Access-Token": token,
+        "Content-Type": "application/json"
       },
-      body: JSON.stringify({ query, variables })
+      body: JSON.stringify({
+        query,
+        variables: { discountCode: code }
+      })
     });
 
-    const data = await response.json();
+    const data = await shopifyRes.json();
 
-    const checkout = data.data.checkoutCreate.checkout;
-    const errors = data.data.checkoutCreate.userErrors;
+    if (data.errors) {
+      console.error("GraphQL Error:", data.errors);
+      return res.status(500).json({ valid: false, message: "Shopify API error" });
+    }
 
-    if (errors.length) {
+    const errors = data.data?.checkoutCreate?.checkoutUserErrors;
+    if (errors && errors.length > 0) {
       return res.json({ valid: false, message: errors[0].message });
     }
 
-    const discount = checkout.discountApplications.edges[0]?.node;
-    if (discount && discount.code === code) {
-      return res.json({ valid: true, discount });
+    const apps = data.data?.checkoutCreate?.checkout?.discountApplications?.edges;
+
+    if (apps && apps.length > 0 && apps[0].node.applicable) {
+      return res.json({ valid: true, discount: apps[0].node });
     } else {
       return res.json({ valid: false, message: "Invalid coupon" });
     }
 
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ valid: false, message: "Server error" });
+    console.error("SERVER ERROR:", err);
+    res.status(500).json({ valid: false, message: "Server error" });
   }
 }
