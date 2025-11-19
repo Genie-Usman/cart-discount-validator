@@ -1,4 +1,3 @@
-// api/validate-coupon.js
 import fetch from "node-fetch";
 
 export default async function handler(req, res) {
@@ -8,24 +7,70 @@ export default async function handler(req, res) {
   if (!code) return res.status(400).json({ valid: false, message: "No coupon provided" });
 
   try {
-    // Call Shopify Admin API to validate code here
-    const shopifyRes = await fetch(`https://${process.env.SHOP_NAME}/admin/api/2025-10/discount_codes/lookup.json?code=${code}`, {
-      headers: {
-        "X-Shopify-Access-Token": process.env.SHOPIFY_ACCESS_TOKEN,
-        "Content-Type": "application/json"
+    // Call Storefront API using GraphQL
+    const query = `
+      mutation checkoutCreate($input: CheckoutCreateInput!) {
+        checkoutCreate(input: $input) {
+          checkout {
+            id
+            discountApplications(first: 10) {
+              edges {
+                node {
+                  ... on DiscountCodeApplication {
+                    code
+                    value {
+                      ... on MoneyV2 {
+                        amount
+                        currencyCode
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
       }
+    `;
+
+    const variables = {
+      input: {
+        lineItems: [],
+        discountCode: code
+      }
+    };
+
+    const response = await fetch(`https://${process.env.SHOPIFY_STORE_DOMAIN}/api/2025-10/graphql.json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Storefront-Access-Token": process.env.SHOPIFY_STOREFRONT_TOKEN
+      },
+      body: JSON.stringify({ query, variables })
     });
 
-    const data = await shopifyRes.json();
+    const data = await response.json();
 
-    if (data.discount_code) {
-      res.json({ valid: true, discount: data.discount_code });
+    const checkout = data.data.checkoutCreate.checkout;
+    const errors = data.data.checkoutCreate.userErrors;
+
+    if (errors.length) {
+      return res.json({ valid: false, message: errors[0].message });
+    }
+
+    const discount = checkout.discountApplications.edges[0]?.node;
+    if (discount && discount.code === code) {
+      return res.json({ valid: true, discount });
     } else {
-      res.json({ valid: false, message: "Invalid coupon" });
+      return res.json({ valid: false, message: "Invalid coupon" });
     }
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ valid: false, message: "Server error" });
+    return res.status(500).json({ valid: false, message: "Server error" });
   }
 }
