@@ -1,4 +1,3 @@
-// /pages/api/validate-coupon.js
 import fetch from "node-fetch";
 
 const ALLOW_ALL = false; // for testing only
@@ -10,7 +9,7 @@ export default async function handler(req, res) {
     .map(s => s.trim())
     .filter(Boolean);
 
-  // Handle CORS preflight
+  // CORS preflight
   if (req.method === "OPTIONS") {
     const allowOrigin = ALLOW_ALL
       ? "*"
@@ -23,6 +22,7 @@ export default async function handler(req, res) {
     return res.status(204).end();
   }
 
+  // Only POST allowed
   if (req.method !== "POST") {
     return res.status(405).json({ valid: false, message: "Method not allowed" });
   }
@@ -47,52 +47,71 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Shopify discount lookup
-    const url = `https://${SHOP}/admin/api/2025-10/discount_codes/lookup.json?code=${encodeURIComponent(code)}`;
-    const apiRes = await fetch(url, {
-      method: "GET",
+    // 1️⃣ Lookup discount code
+    const codeUrl = `https://${SHOP}/admin/api/2025-10/discount_codes/lookup.json?code=${encodeURIComponent(code)}`;
+    const codeRes = await fetch(codeUrl, {
       headers: {
         "X-Shopify-Access-Token": ADMIN_TOKEN,
         "Content-Type": "application/json",
       },
     });
 
-    if (apiRes.status !== 200) {
-      if (apiRes.status === 404) {
+    if (!codeRes.ok) {
+      if (codeRes.status === 404) {
         return res.status(200).json({ valid: false, message: "Discount code not found" });
       }
-      const text = await apiRes.text();
-      console.error("Shopify returned:", apiRes.status, text);
-      return res.status(apiRes.status).json({ valid: false, message: "Shopify API error", details: text });
+      const text = await codeRes.text();
+      return res.status(codeRes.status).json({ valid: false, message: "Shopify API error", details: text });
     }
 
-    const data = await apiRes.json();
-    const discount = data.discount_code || data;
-    const priceRule = discount.price_rule || discount;
+    const codeData = await codeRes.json();
+    const discount = codeData.discount_code;
+    if (!discount || !discount.price_rule_id) {
+      return res.status(200).json({ valid: false, message: "Invalid discount code structure" });
+    }
 
+    // 2️⃣ Fetch the full priceRule
+    const ruleUrl = `https://${SHOP}/admin/api/2025-10/price_rules/${discount.price_rule_id}.json`;
+    const ruleRes = await fetch(ruleUrl, {
+      headers: {
+        "X-Shopify-Access-Token": ADMIN_TOKEN,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!ruleRes.ok) {
+      const text = await ruleRes.text();
+      return res.status(ruleRes.status).json({ valid: false, message: "Shopify API error fetching priceRule", details: text });
+    }
+
+    const ruleData = await ruleRes.json();
+    const priceRule = ruleData.price_rule;
+
+    console.log("DEBUG priceRule:", priceRule);
+
+    // 3️⃣ Calculate discount
     const original_total = typeof cart_total_cents === "number" ? cart_total_cents : 0;
     let amount = 0;
     let new_total = original_total;
 
-    if (priceRule) {
-      // Normalize the value: Shopify often returns "-10.0" as string
-      const rawValue = priceRule.value || discount.amount || "0";
-      const value = Math.abs(parseFloat(rawValue)) || 0;
-
-      if (priceRule.value_type === "percentage") {
-        amount = Math.round(original_total * (value / 100));
-      } else if (priceRule.value_type === "fixed_amount") {
-        const fixedCents = Math.round(value * 100);
+    if (priceRule && priceRule.status === "ACTIVE") {
+      const valueV2 = priceRule.valueV2 || {};
+      if (valueV2 && valueV2.amount && valueV2.currencyCode) {
+        // Fixed amount discount
+        const fixedCents = Math.round(parseFloat(valueV2.amount) * 100);
         amount = Math.min(fixedCents, original_total);
+      } else if (priceRule.value_type === "percentage" && priceRule.value) {
+        const pct = parseFloat(priceRule.value) || 0;
+        amount = Math.round(original_total * (pct / 100));
       }
-
       new_total = Math.max(0, original_total - amount);
     }
 
     return res.status(200).json({
       valid: true,
       discount,
-      amount,         // discount in cents, always positive
+      priceRule,
+      amount,         // discount in cents
       original_total, // original cart total in cents
       new_total,      // cart total after discount
     });
