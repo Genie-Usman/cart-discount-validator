@@ -10,6 +10,7 @@ export default async function handler(req, res) {
     .map(s => s.trim())
     .filter(Boolean);
 
+  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     const allowOrigin = ALLOW_ALL ? "*" : (allowedOrigins.includes(origin) ? origin : allowedOrigins[0] || "");
     res.setHeader("Access-Control-Allow-Origin", allowOrigin || "*");
@@ -18,10 +19,12 @@ export default async function handler(req, res) {
     return res.status(204).end();
   }
 
+  // Only POST allowed
   if (req.method !== "POST") {
     return res.status(405).json({ valid: false, message: "Method not allowed" });
   }
 
+  // CORS header for actual request
   const allowOrigin = ALLOW_ALL ? "*" : (allowedOrigins.includes(origin) ? origin : allowedOrigins[0] || "");
   res.setHeader("Access-Control-Allow-Origin", allowOrigin || "*");
 
@@ -62,13 +65,12 @@ export default async function handler(req, res) {
           const pct = Number(priceRule.value) || 0;
           amount = Math.round(original_total * (pct / 100));
         }
-        // Fixed amount discount
+        // Fixed amount discount (Shopify value in store currency units)
         else if (priceRule.value_type === "fixed_amount" && priceRule.value) {
-          // Shopify returns value in store currency units (like "6300.00" for PKR)
-          const fixed = Math.round(Number(priceRule.value) * 100);
+          const fixed = Math.round(Number(priceRule.value) * 100); // convert to cents
           amount = Math.min(fixed, original_total);
         }
-        // Fallback if no value_type
+        // Fallback
         else if (discount.amount) {
           const fixed = Math.round(Number(discount.amount) * 100);
           amount = Math.min(fixed, original_total);
