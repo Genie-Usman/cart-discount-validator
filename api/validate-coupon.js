@@ -22,7 +22,6 @@ export default async function handler(req, res) {
     return res.status(204).end();
   }
 
-  // Only POST allowed
   if (req.method !== "POST") {
     return res.status(405).json({ valid: false, message: "Method not allowed" });
   }
@@ -50,16 +49,11 @@ export default async function handler(req, res) {
     // 1️⃣ Lookup discount code
     const codeUrl = `https://${SHOP}/admin/api/2025-10/discount_codes/lookup.json?code=${encodeURIComponent(code)}`;
     const codeRes = await fetch(codeUrl, {
-      headers: {
-        "X-Shopify-Access-Token": ADMIN_TOKEN,
-        "Content-Type": "application/json",
-      },
+      headers: { "X-Shopify-Access-Token": ADMIN_TOKEN, "Content-Type": "application/json" },
     });
 
     if (!codeRes.ok) {
-      if (codeRes.status === 404) {
-        return res.status(200).json({ valid: false, message: "Discount code not found" });
-      }
+      if (codeRes.status === 404) return res.status(200).json({ valid: false, message: "Discount code not found" });
       const text = await codeRes.text();
       return res.status(codeRes.status).json({ valid: false, message: "Shopify API error", details: text });
     }
@@ -70,13 +64,10 @@ export default async function handler(req, res) {
       return res.status(200).json({ valid: false, message: "Invalid discount code structure" });
     }
 
-    // 2️⃣ Fetch the full priceRule
+    // 2️⃣ Fetch full priceRule
     const ruleUrl = `https://${SHOP}/admin/api/2025-10/price_rules/${discount.price_rule_id}.json`;
     const ruleRes = await fetch(ruleUrl, {
-      headers: {
-        "X-Shopify-Access-Token": ADMIN_TOKEN,
-        "Content-Type": "application/json",
-      },
+      headers: { "X-Shopify-Access-Token": ADMIN_TOKEN, "Content-Type": "application/json" },
     });
 
     if (!ruleRes.ok) {
@@ -95,14 +86,14 @@ export default async function handler(req, res) {
     let new_total = original_total;
 
     if (priceRule && priceRule.status === "ACTIVE") {
-      const valueV2 = priceRule.valueV2 || {};
-      if (valueV2 && valueV2.amount && valueV2.currencyCode) {
-        // Fixed amount discount
-        const fixedCents = Math.round(parseFloat(valueV2.amount) * 100);
-        amount = Math.min(fixedCents, original_total);
-      } else if (priceRule.value_type === "percentage" && priceRule.value) {
-        const pct = parseFloat(priceRule.value) || 0;
+      if (priceRule.value_type === "percentage" && priceRule.value) {
+        // Shopify sometimes returns negative percentage, force positive
+        const pct = Math.abs(parseFloat(priceRule.value) || 0);
         amount = Math.round(original_total * (pct / 100));
+      } else if (priceRule.valueV2 && priceRule.valueV2.amount) {
+        // Fixed amount discount
+        const fixedCents = Math.round(Math.abs(parseFloat(priceRule.valueV2.amount)) * 100);
+        amount = Math.min(fixedCents, original_total);
       }
       new_total = Math.max(0, original_total - amount);
     }
@@ -111,7 +102,7 @@ export default async function handler(req, res) {
       valid: true,
       discount,
       priceRule,
-      amount,         // discount in cents
+      amount,         // discount in cents (always positive)
       original_total, // original cart total in cents
       new_total,      // cart total after discount
     });
