@@ -1,4 +1,3 @@
-// /pages/api/validate-coupon.js
 import fetch from "node-fetch";
 
 const ALLOW_ALL = false; // for testing only
@@ -72,32 +71,36 @@ export default async function handler(req, res) {
 
     const original_total = typeof cart_total_cents === "number" ? cart_total_cents : 0;
     let amount = 0;
-let new_total = original_total;
+    let new_total = original_total;
 
-if (priceRule) {
-  console.log("DEBUG priceRule:", priceRule); // <--- log to see actual data
+    if (priceRule) {
+      const valueType = priceRule.value_type;
+      let value = parseFloat(priceRule.value);
 
-  const valueType = priceRule.value_type;
-  const valueRaw = priceRule.value;
+      if (isNaN(value)) value = 0;
 
-  if (valueType === "percentage") {
-    const pct = parseFloat(valueRaw) || 0;
-    amount = Math.round(original_total * (pct / 100));
-  } else if (valueType === "fixed_amount") {
-    const fixedCents = Math.round(parseFloat(valueRaw) * 100);
-    amount = Math.min(fixedCents, original_total);
-  } else if (discount.amount) {
-    const fixedCents = Math.round(parseFloat(discount.amount) * 100);
-    amount = Math.min(fixedCents, original_total);
-  }
+      if (valueType === "percentage") {
+        // Handle fraction vs percent
+        if (value <= 1) value = value * 100;
+        amount = Math.round(original_total * (value / 100));
+      } else if (valueType === "fixed_amount") {
+        // Convert store currency units to cents
+        amount = Math.round(value * 100);
+        amount = Math.min(amount, original_total);
+      } else if (discount.amount) {
+        amount = Math.round(parseFloat(discount.amount) * 100);
+        amount = Math.min(amount, original_total);
+      }
 
-  new_total = Math.max(0, original_total - amount);
-}
+      // Ensure amount is positive
+      amount = Math.max(0, amount);
+      new_total = Math.max(0, original_total - amount);
+    }
 
     return res.status(200).json({
       valid: true,
       discount,
-      amount,         // discount in cents, always positive
+      amount,         // discount in cents
       original_total, // original cart total in cents
       new_total,      // cart total after discount
     });
