@@ -1,5 +1,4 @@
 // /pages/api/validate-coupon.js
-
 import fetch from "node-fetch";
 
 const ALLOW_ALL = false;
@@ -11,11 +10,12 @@ export default async function handler(req, res) {
     .map(s => s.trim())
     .filter(Boolean);
 
-  // CORS preflight
   if (req.method === "OPTIONS") {
     const allowOrigin = ALLOW_ALL
       ? "*"
-      : (allowedOrigins.includes(origin) ? origin : allowedOrigins[0] || "");
+      : allowedOrigins.includes(origin)
+      ? origin
+      : allowedOrigins[0] || "";
     res.setHeader("Access-Control-Allow-Origin", allowOrigin || "*");
     res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
@@ -28,7 +28,9 @@ export default async function handler(req, res) {
 
   const allowOrigin = ALLOW_ALL
     ? "*"
-    : (allowedOrigins.includes(origin) ? origin : allowedOrigins[0] || "");
+    : allowedOrigins.includes(origin)
+    ? origin
+    : allowedOrigins[0] || "";
   res.setHeader("Access-Control-Allow-Origin", allowOrigin || "*");
 
   const { code, cart_total_cents } = req.body || {};
@@ -44,64 +46,39 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1. Lookup discount code
+    // Lookup discount code
     const codeUrl = `https://${SHOP}/admin/api/2025-10/discount_codes/lookup.json?code=${encodeURIComponent(code)}`;
     const codeRes = await fetch(codeUrl, {
-      headers: {
-        "X-Shopify-Access-Token": ADMIN_TOKEN,
-        "Content-Type": "application/json",
-      },
+      headers: { "X-Shopify-Access-Token": ADMIN_TOKEN, "Content-Type": "application/json" },
     });
 
     if (!codeRes.ok) {
-      if (codeRes.status === 404) {
-        return res.status(200).json({ valid: false, message: "Discount code not found" });
-      }
+      if (codeRes.status === 404) return res.status(200).json({ valid: false, message: "Discount code not found" });
       const text = await codeRes.text();
       return res.status(codeRes.status).json({ valid: false, message: "Shopify API error", details: text });
     }
 
     const codeData = await codeRes.json();
-    const discount = codeData.discount_code;
-    if (!discount || !discount.price_rule_id) {
-      return res.status(200).json({ valid: false, message: "Invalid discount code structure" });
-    }
-
-    // 2. Fetch the full price rule
-    const ruleUrl = `https://${SHOP}/admin/api/2025-10/price_rules/${discount.price_rule_id}.json`;
-    const ruleRes = await fetch(ruleUrl, {
-      headers: {
-        "X-Shopify-Access-Token": ADMIN_TOKEN,
-        "Content-Type": "application/json",
-      },
-    });
-
-    if (!ruleRes.ok) {
-      const text = await ruleRes.text();
-      return res.status(ruleRes.status).json({ valid: false, message: "Shopify API error fetching price rule", details: text });
-    }
-
-    const ruleData = await ruleRes.json();
-    const priceRule = ruleData.price_rule;
+    const discount = codeData.discount_code || codeData;
+    const priceRule = discount.price_rule || discount;
 
     console.log("DEBUG priceRule:", priceRule);
 
-    // 3. Calculate discount
     const original_total = typeof cart_total_cents === "number" ? cart_total_cents : 0;
     let amount = 0;
     let new_total = original_total;
 
-    if (priceRule && priceRule.status === "ACTIVE") {
-      // Case: fixed amount using valueV2
-      if (priceRule.valueV2 && priceRule.valueV2.amount) {
-        const fixed = Math.abs(parseFloat(priceRule.valueV2.amount) || 0);
-        const fixedCents = Math.round(fixed * 100);
-        amount = Math.min(fixedCents, original_total);
-      }
-      // Case: percentage discount
-      else if (priceRule.value_type === "percentage" && priceRule.value) {
+    if (priceRule) {
+      if (priceRule.value_type === "percentage" && priceRule.value) {
+        // ✅ Force positive value here
         const pct = Math.abs(parseFloat(priceRule.value) || 0);
         amount = Math.round(original_total * (pct / 100));
+      } else if (priceRule.value_type === "fixed_amount" && priceRule.value) {
+        const fixed = Math.abs(Math.round(parseFloat(priceRule.value) * 100)); // cents
+        amount = Math.min(fixed, original_total);
+      } else if (discount.amount) {
+        const fixed = Math.abs(Math.round(parseFloat(discount.amount) * 100));
+        amount = Math.min(fixed, original_total);
       }
 
       new_total = Math.max(0, original_total - amount);
@@ -111,9 +88,9 @@ export default async function handler(req, res) {
       valid: true,
       discount,
       priceRule,
-      amount,         // discount in cents
-      original_total, // before discount
-      new_total,      // after discount
+      amount,         // now always positive
+      original_total,
+      new_total,
     });
 
   } catch (err) {
