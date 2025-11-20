@@ -1,7 +1,37 @@
 // /pages/api/validate-coupon.js
 import fetch from "node-fetch";
 
+const ALLOW_ALL = false;
+
 export default async function handler(req, res) {
+  const origin = req.headers.origin || "";
+  const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const allowOrigin = ALLOW_ALL
+    ? "*"
+    : allowedOrigins.includes(origin)
+    ? origin
+    : allowedOrigins[0] || "";
+
+  // Handle preflight request
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+    res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+    return res.status(204).end();
+  }
+
+  // Only allow POST
+  if (req.method !== "POST") {
+    res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+    return res.status(405).json({ valid: false, message: "Method not allowed" });
+  }
+
+  res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+
   const { code, cart_total_cents } = req.body;
   const SHOP = process.env.SHOP_NAME;
   const ADMIN_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
@@ -50,7 +80,7 @@ export default async function handler(req, res) {
     const priceRuleData = await priceRuleRes.json();
     const priceRule = priceRuleData.price_rule;
 
-    // Step 3: Check prerequisites
+    // Step 3: Check prerequisite subtotal
     if (priceRule.prerequisite_subtotal_range?.greater_than_or_equal_to) {
       const minSubtotalCents = Math.round(parseFloat(priceRule.prerequisite_subtotal_range.greater_than_or_equal_to) * 100);
       if (original_total < minSubtotalCents) {
