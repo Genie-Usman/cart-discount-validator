@@ -70,40 +70,37 @@ export default async function handler(req, res) {
     const priceRule = discount.price_rule || discount;
 
     const original_total = typeof cart_total_cents === "number" ? cart_total_cents : 0;
-    let amount = 0;
-    let new_total = original_total;
+// Calculate discount correctly
+let amount = 0;
+let new_total = original_total;
 
-    if (priceRule) {
-      const valueType = priceRule.value_type;
-      let value = parseFloat(priceRule.value);
+// ----- NORMALIZE VALUE -----
+let valueType = priceRule.value_type || discount.value_type;
+let valueRaw  = priceRule.value || discount.value;
 
-      if (isNaN(value)) value = 0;
+// Shopify ALWAYS returns negative values, so fix that:
+let cleanValue = Math.abs(parseFloat(valueRaw)) || 0;
 
-      if (valueType === "percentage") {
-        // Handle fraction vs percent
-        if (value <= 1) value = value * 100;
-        amount = Math.round(original_total * (value / 100));
-      } else if (valueType === "fixed_amount") {
-        // Convert store currency units to cents
-        amount = Math.round(value * 100);
-        amount = Math.min(amount, original_total);
-      } else if (discount.amount) {
-        amount = Math.round(parseFloat(discount.amount) * 100);
-        amount = Math.min(amount, original_total);
-      }
+// ----- APPLY DISCOUNT -----
+if (valueType === "percentage") {
+  amount = Math.round(original_total * (cleanValue / 100)); // cleanValue is positive 10
+}
 
-      // Ensure amount is positive
-      amount = Math.max(0, amount);
-      new_total = Math.max(0, original_total - amount);
-    }
+else if (valueType === "fixed_amount") {
+  const fixedCents = Math.round(cleanValue * 100);
+  amount = Math.min(fixedCents, original_total); 
+}
 
-    return res.status(200).json({
-      valid: true,
-      discount,
-      amount,         // discount in cents
-      original_total, // original cart total in cents
-      new_total,      // cart total after discount
-    });
+new_total = Math.max(0, original_total - amount);
+
+return res.status(200).json({
+  valid: true,
+  discount,
+  amount,
+  original_total,
+  new_total,
+});
+
 
   } catch (err) {
     console.error("Server error validating coupon:", err);
