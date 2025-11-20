@@ -72,22 +72,27 @@ export default async function handler(req, res) {
 
     const original_total = typeof cart_total_cents === "number" ? cart_total_cents : 0;
     let amount = 0;
-    let new_total = original_total;
+let new_total = original_total;
 
-    if (priceRule) {
-      if (priceRule.value_type === "percentage") {
-        const pct = Math.abs(parseFloat(priceRule.value)) || 0;
-        amount = Math.round(original_total * (pct / 100));
-      } else if (priceRule.value_type === "fixed_amount") {
-        const fixedCents = Math.round(Math.abs(parseFloat(priceRule.value)) * 100);
-        amount = Math.min(fixedCents, original_total);
-      } else if (discount.amount) {
-        const fixedCents = Math.round(Math.abs(parseFloat(discount.amount)) * 100);
-        amount = Math.min(fixedCents, original_total);
-      }
+if (priceRule) {
+  console.log("DEBUG priceRule:", priceRule); // <--- log to see actual data
 
-      new_total = Math.max(0, original_total - amount);
-    }
+  const valueType = priceRule.value_type;
+  const valueRaw = priceRule.value;
+
+  if (valueType === "percentage") {
+    const pct = parseFloat(valueRaw) || 0;
+    amount = Math.round(original_total * (pct / 100));
+  } else if (valueType === "fixed_amount") {
+    const fixedCents = Math.round(parseFloat(valueRaw) * 100);
+    amount = Math.min(fixedCents, original_total);
+  } else if (discount.amount) {
+    const fixedCents = Math.round(parseFloat(discount.amount) * 100);
+    amount = Math.min(fixedCents, original_total);
+  }
+
+  new_total = Math.max(0, original_total - amount);
+}
 
     return res.status(200).json({
       valid: true,
