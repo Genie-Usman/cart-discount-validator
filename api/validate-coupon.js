@@ -1,4 +1,3 @@
-// /pages/api/validate-coupon.js
 import fetch from "node-fetch";
 
 const ALLOW_ALL = false;
@@ -15,7 +14,8 @@ export default async function handler(req, res) {
       ? "*"
       : allowedOrigins.includes(origin)
       ? origin
-      : allowedOrigins[0] || "";
+      : allowedOrigins[0] || "*";
+
     res.setHeader("Access-Control-Allow-Origin", allowOrigin);
     res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
@@ -30,165 +30,137 @@ export default async function handler(req, res) {
     ? "*"
     : allowedOrigins.includes(origin)
     ? origin
-    : allowedOrigins[0] || "";
+    : allowedOrigins[0] || "*";
+
   res.setHeader("Access-Control-Allow-Origin", allowOrigin);
 
   const { code, cart_total_cents } = req.body || {};
-  if (!code || typeof code !== "string") {
+
+  if (!code) {
     return res.status(400).json({ valid: false, message: "No coupon code provided" });
   }
 
   const SHOP = process.env.SHOP_NAME;
   const ADMIN_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+
   if (!SHOP || !ADMIN_TOKEN) {
-    console.error("Missing env vars SHOP_NAME or SHOPIFY_ACCESS_TOKEN");
     return res.status(500).json({ valid: false, message: "Server misconfiguration" });
   }
 
   try {
     const original_total = typeof cart_total_cents === "number" ? cart_total_cents : 0;
 
-    // Build GraphQL query
+    // REAL WORKING SHOPIFY QUERY
     const query = `
-      query DiscountCodeLookup($code: String!) {
-        discountCodeBasic(code: $code) {
-          id
-          code
-          usageCount
-          usageLimit
-          priceRule {
-            id
-            valueV2 {
-              __typename
-              ... on MoneyV2 {
-                amount
-                currencyCode
+      query GetDiscount($code: String!) {
+        discountCodes(first: 1, query: $code) {
+          edges {
+            node {
+              id
+              code
+              usageCount
+              priceRule {
+                id
+                valueV2 {
+                  __typename
+                  ... on MoneyV2 {
+                    amount
+                    currencyCode
+                  }
+                  ... on PricingPercentageValue {
+                    percentage
+                  }
+                }
+                usageLimit
+                prerequisiteSubtotalRange {
+                  greaterThanOrEqualTo
+                }
               }
-              ... on PricingPercentageValue {
-                percentage
-              }
-            }
-            usageLimit
-            prerequisiteSubtotalRange {
-              greaterThanOrEqualTo
             }
           }
         }
       }
     `;
 
-    const response = await fetch(`https://${SHOP}/admin/api/2025-10/graphql.json`, {
+    const gqlRes = await fetch(`https://${SHOP}/admin/api/2025-01/graphql.json`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Shopify-Access-Token": ADMIN_TOKEN,
+        "X-Shopify-Access-Token": ADMIN_TOKEN
       },
-      body: JSON.stringify({ query, variables: { code } }),
+      body: JSON.stringify({ query, variables: { code } })
     });
 
-    if (!response.ok) {
-      const text = await response.text();
-      console.error("Shopify GraphQL error response:", text);
-      throw new Error(`Shopify API error: ${response.status}`);
+    const data = await gqlRes.json();
+    console.log("GraphQL Response:", JSON.stringify(data, null, 2));
+
+    if (data.errors) {
+      return res.status(500).json({ valid: false, message: "Shopify GraphQL Error", errors: data.errors });
     }
 
-    const respJson = await response.json();
-    // Debug logging
-    console.log("GraphQL raw response:", JSON.stringify(respJson));
+    const node = data.data?.discountCodes?.edges?.[0]?.node;
 
-    // If GraphQL returns errors
-    if (respJson.errors) {
-      console.error("GraphQL query errors:", respJson.errors);
-      return res.status(500).json({ valid: false, message: "Shopify API error", errors: respJson.errors });
-    }
-
-    const discount = respJson.data?.discountCodeBasic;
-    if (!discount) {
-      // Discount code doesn’t exist
+    if (!node) {
       return res.status(200).json({ valid: false, message: "Discount code not found", original_total });
     }
 
-    const priceRule = discount.priceRule;
-    if (!priceRule) {
-      // No associated price rule — weird but handle it
-      return res.status(200).json({ valid: false, message: "No price rule for this discount", original_total });
-    }
+    const priceRule = node.priceRule;
 
-    // 1. Check prerequisite subtotal
-    if (priceRule.prerequisiteSubtotalRange?.greaterThanOrEqualTo != null) {
-      const minSubtotalFloat = parseFloat(priceRule.prerequisiteSubtotalRange.greaterThanOrEqualTo);
-      const minSubtotalCents = Math.round(minSubtotalFloat * 100);
-      if (original_total < minSubtotalCents) {
+    // PRE-REQ CHECK
+    const prereq = priceRule.prerequisiteSubtotalRange?.greaterThanOrEqualTo;
+    if (prereq != null) {
+      const min = Math.round(parseFloat(prereq) * 100);
+      if (original_total < min) {
         return res.status(200).json({
           valid: false,
-          message: `Cart total must be at least ${minSubtotalFloat} to apply this coupon`,
-          original_total,
+          message: `Cart total must be at least ${prereq}`,
+          original_total
         });
       }
     }
 
-    // 2. Check usage limit (if any)
-    if (typeof priceRule.usageLimit === "number") {
-      const usedCount = discount.usageCount || 0;
-      if (usedCount >= priceRule.usageLimit) {
-        return res.status(200).json({
-          valid: false,
-          message: "Discount usage limit reached",
-          usage_count: usedCount,
-          usage_limit: priceRule.usageLimit,
-        });
-      }
+    // USAGE LIMIT CHECK
+    if (priceRule.usageLimit != null && node.usageCount >= priceRule.usageLimit) {
+      return res.status(200).json({
+        valid: false,
+        message: "Discount usage limit reached",
+      });
     }
 
-    // 3. Calculate discount amount
-    let amount = 0; // in cents
+    // DISCOUNT CALCULATION
+    let amount = 0;
+    const v = priceRule.valueV2;
 
-    const valueV2 = priceRule.valueV2;
-    if (valueV2) {
-      // Two possible types: MoneyV2 or PricingPercentageValue
-      if (valueV2.__typename === "MoneyV2") {
-        // Fixed‐amount discount
-        const moneyAmount = parseFloat(valueV2.amount); // e.g. "10.00"
-        const discountCents = Math.round(moneyAmount * 100);
-        // Don't give more than the cart total
-        amount = Math.min(discountCents, original_total);
-      } else if (valueV2.__typename === "PricingPercentageValue") {
-        const pct = parseFloat(valueV2.percentage); // e.g. 10 = 10%
-        amount = Math.round((original_total * pct) / 100);
-      } else {
-        console.warn("Unexpected valueV2 type:", valueV2.__typename);
-      }
-    } else {
-      console.warn("No valueV2 found on priceRule, cannot compute amount");
+    if (v.__typename === "PricingPercentageValue") {
+      amount = Math.round((original_total * parseFloat(v.percentage)) / 100);
     }
 
-    // 4. Compute new total
+    if (v.__typename === "MoneyV2") {
+      const fixed = Math.round(parseFloat(v.amount) * 100);
+      amount = Math.min(fixed, original_total);
+    }
+
     const new_total = Math.max(0, original_total - amount);
 
-    return res.status(200).json({
+    res.status(200).json({
       valid: true,
       discount: {
-        id: discount.id,
-        code: discount.code,
-        usageCount: discount.usageCount,
+        id: node.id,
+        code: node.code,
+        usageCount: node.usageCount
       },
-      priceRule: {
-        id: priceRule.id,
-        usageLimit: priceRule.usageLimit,
-        prerequisiteSubtotalRange: priceRule.prerequisiteSubtotalRange,
-        valueV2,
-      },
+      priceRule,
       original_total,
       amount,
-      new_total,
+      new_total
     });
 
   } catch (err) {
-    console.error("Server error validating coupon:", err);
+    console.error("Validator error:", err);
     return res.status(500).json({
       valid: false,
       message: "Server error",
-      error: err.message,
+      error: err.message
     });
   }
 }
