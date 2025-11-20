@@ -1,5 +1,4 @@
 // /pages/api/validate-coupon.js
-
 import fetch from "node-fetch";
 
 const ALLOW_ALL = false;
@@ -74,47 +73,23 @@ export default async function handler(req, res) {
 
     const original_total = typeof cart_total_cents === "number" ? cart_total_cents : 0;
 
-    let amount = 0; // discount in cents
-    let new_total = original_total;
-
-    // 1. Check prerequisites (subtotal minimum)
+    // 1️⃣ Check prerequisites (minimum subtotal)
     if (priceRule.prerequisite_subtotal_range) {
       const { greater_than_or_equal_to } = priceRule.prerequisite_subtotal_range;
       if (greater_than_or_equal_to) {
-        const minSubtotal = Math.round(parseFloat(greater_than_or_equal_to) * 100);
+        const minSubtotal = Math.round(parseFloat(greater_than_or_equal_to) * 100); // in cents
         if (original_total < minSubtotal) {
-          // Cart doesn't meet the minimum requirement → cannot apply discount
           return res.status(200).json({
             valid: false,
-            message: `Cart total must be at least ${minSubtotal} to apply this coupon`,
+            message: `Cart total must be at least ${minSubtotal / 100} to apply this coupon`,
             original_total,
           });
         }
       }
     }
 
-    // 2. Calculate discount amount
-    if (priceRule.value_type === "percentage") {
-      // value is something like "-10.0" by Shopify REST API
-      const pct = Math.abs(parseFloat(priceRule.value) || 0);
-      // compute discount in cents
-      amount = Math.round((original_total * pct) / 100);
-    } else if (priceRule.value_type === "fixed_amount") {
-      // fixed amount discount
-      const fixed = Math.abs(Math.round(parseFloat(priceRule.value) * 100));
-      amount = Math.min(fixed, original_total);
-    } else {
-      // Unexpected value_type; fallback
-      console.warn("Unexpected priceRule.value_type:", priceRule.value_type);
-      if (discount.amount) {
-        const fixed = Math.abs(Math.round(parseFloat(discount.amount) * 100));
-        amount = Math.min(fixed, original_total);
-      }
-    }
-
-    // 3. Check usage limit (if any)
+    // 2️⃣ Check usage limit
     if (typeof priceRule.usage_limit === "number") {
-      // how many times used so far
       const used = discount.usage_count || 0;
       if (used >= priceRule.usage_limit) {
         return res.status(200).json({
@@ -126,17 +101,31 @@ export default async function handler(req, res) {
       }
     }
 
-    // 4. Final total
-    new_total = Math.max(0, original_total - amount);
+    // 3️⃣ Calculate discount amount (always positive)
+    let amount = 0;
+    if (priceRule.value_type === "percentage" && priceRule.value) {
+      const pct = Math.abs(parseFloat(priceRule.value)); // percentage
+      amount = Math.round(original_total * (pct / 100));
+    } else if (priceRule.value_type === "fixed_amount" && priceRule.value) {
+      const fixed = Math.abs(Math.round(parseFloat(priceRule.value) * 100));
+      amount = Math.min(fixed, original_total);
+    } else if (discount.amount) {
+      const fixed = Math.abs(Math.round(parseFloat(discount.amount) * 100));
+      amount = Math.min(fixed, original_total);
+    }
 
+    const new_total = Math.max(0, original_total - amount);
+
+    // ✅ Return structured response
     return res.status(200).json({
       valid: true,
       discount,
       priceRule,
-      amount, // positive number in cents
+      amount,          // positive number in cents
       original_total,
       new_total,
     });
+
   } catch (err) {
     console.error("Server error validating coupon:", err);
     return res.status(500).json({ valid: false, message: "Server error" });
