@@ -1,26 +1,39 @@
-// /pages/api/validate-coupon.js  (or /app/api/validate-coupon/route.js for App Router)
-import fetch from "node-fetch";
+// /pages/api/validate-coupon.js
 
 export default async function handler(req, res) {
+  // --- CORS FIX ---
+  res.setHeader("Access-Control-Allow-Origin", "https://eiser-ecom.myshopify.com");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Max-Age", "86400");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end(); // preflight success
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ valid: false, message: "Method not allowed" });
   }
 
   const { code } = req.body;
-  if (!code) return res.status(400).json({ valid: false, message: "No coupon provided" });
+  if (!code) {
+    return res.status(400).json({ valid: false, message: "No coupon provided" });
+  }
 
-  // Use environment variables
-  const SHOP = process.env.SHOP_NAME;                 // "eiser-ecom.myshopify.com"
-  const ADMIN_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN; // Admin API token with read_price_rules
+  const SHOP = process.env.SHOP_NAME;                 // ex: "eiser-ecom.myshopify.com"
+  const ADMIN_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN; // Admin API token
 
   if (!SHOP || !ADMIN_TOKEN) {
-    return res.status(500).json({ valid: false, message: "Server misconfiguration" });
+    return res.status(500).json({
+      valid: false,
+      message: "Server misconfiguration: Missing SHOP_NAME or SHOPIFY_ACCESS_TOKEN",
+    });
   }
 
   try {
     const url = `https://${SHOP}/admin/api/2025-10/discount_codes/lookup.json?code=${encodeURIComponent(code)}`;
 
-    const apiRes = await fetch(url, {
+    const shopifyResponse = await fetch(url, {
       method: "GET",
       headers: {
         "X-Shopify-Access-Token": ADMIN_TOKEN,
@@ -28,17 +41,32 @@ export default async function handler(req, res) {
       },
     });
 
-    if (apiRes.status === 200) {
-      const data = await apiRes.json();
-      return res.status(200).json({ valid: true, discount: data });
-    } else if (apiRes.status === 404) {
-      return res.status(200).json({ valid: false, message: "Discount code not found" });
-    } else {
-      const text = await apiRes.text();
-      return res.status(apiRes.status).json({ valid: false, message: text });
+    // Coupon found
+    if (shopifyResponse.status === 200) {
+      const discountData = await shopifyResponse.json();
+      return res.status(200).json({ valid: true, discount: discountData });
     }
+
+    // Coupon not found
+    if (shopifyResponse.status === 404) {
+      return res.status(200).json({
+        valid: false,
+        message: "Discount code not found",
+      });
+    }
+
+    // Some other Shopify error
+    const errorText = await shopifyResponse.text();
+    return res.status(shopifyResponse.status).json({
+      valid: false,
+      message: errorText,
+    });
+
   } catch (err) {
     console.error("Server error:", err);
-    return res.status(500).json({ valid: false, message: "Server error" });
+    return res.status(500).json({
+      valid: false,
+      message: "Server error",
+    });
   }
 }
