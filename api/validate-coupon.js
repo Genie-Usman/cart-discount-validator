@@ -1,3 +1,4 @@
+// /pages/api/validate-coupon.js
 import fetch from "node-fetch";
 
 const ALLOW_ALL = false; // for testing only
@@ -22,7 +23,6 @@ export default async function handler(req, res) {
     return res.status(204).end();
   }
 
-  // Only POST allowed
   if (req.method !== "POST") {
     return res.status(405).json({ valid: false, message: "Method not allowed" });
   }
@@ -47,6 +47,7 @@ export default async function handler(req, res) {
   }
 
   try {
+    // Shopify discount lookup
     const url = `https://${SHOP}/admin/api/2025-10/discount_codes/lookup.json?code=${encodeURIComponent(code)}`;
     const apiRes = await fetch(url, {
       method: "GET",
@@ -70,37 +71,31 @@ export default async function handler(req, res) {
     const priceRule = discount.price_rule || discount;
 
     const original_total = typeof cart_total_cents === "number" ? cart_total_cents : 0;
-// Calculate discount correctly
-let amount = 0;
-let new_total = original_total;
+    let amount = 0;
+    let new_total = original_total;
 
-// ----- NORMALIZE VALUE -----
-let valueType = priceRule.value_type || discount.value_type;
-let valueRaw  = priceRule.value || discount.value;
+    if (priceRule) {
+      // Normalize the value: Shopify often returns "-10.0" as string
+      const rawValue = priceRule.value || discount.amount || "0";
+      const value = Math.abs(parseFloat(rawValue)) || 0;
 
-// Shopify ALWAYS returns negative values, so fix that:
-let cleanValue = Math.abs(parseFloat(valueRaw)) || 0;
+      if (priceRule.value_type === "percentage") {
+        amount = Math.round(original_total * (value / 100));
+      } else if (priceRule.value_type === "fixed_amount") {
+        const fixedCents = Math.round(value * 100);
+        amount = Math.min(fixedCents, original_total);
+      }
 
-// ----- APPLY DISCOUNT -----
-if (valueType === "percentage") {
-  amount = Math.round(original_total * (cleanValue / 100)); // cleanValue is positive 10
-}
+      new_total = Math.max(0, original_total - amount);
+    }
 
-else if (valueType === "fixed_amount") {
-  const fixedCents = Math.round(cleanValue * 100);
-  amount = Math.min(fixedCents, original_total); 
-}
-
-new_total = Math.max(0, original_total - amount);
-
-return res.status(200).json({
-  valid: true,
-  discount,
-  amount,
-  original_total,
-  new_total,
-});
-
+    return res.status(200).json({
+      valid: true,
+      discount,
+      amount,         // discount in cents, always positive
+      original_total, // original cart total in cents
+      new_total,      // cart total after discount
+    });
 
   } catch (err) {
     console.error("Server error validating coupon:", err);
