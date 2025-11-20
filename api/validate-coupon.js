@@ -46,82 +46,97 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Lookup discount code via REST API
-    const codeUrl = `https://${SHOP}/admin/api/2025-10/discount_codes/lookup.json?code=${encodeURIComponent(
-      code
-    )}`;
-    const codeRes = await fetch(codeUrl, {
-      headers: { "X-Shopify-Access-Token": ADMIN_TOKEN, "Content-Type": "application/json" },
-    });
-
-    if (!codeRes.ok) {
-      if (codeRes.status === 404) {
-        return res.status(200).json({ valid: false, message: "Discount code not found" });
-      } else {
-        const text = await codeRes.text();
-        return res
-          .status(codeRes.status)
-          .json({ valid: false, message: "Shopify API error", details: text });
-      }
-    }
-
-    const codeData = await codeRes.json();
-    const discount = codeData.discount_code || codeData;
-    const priceRule = discount.price_rule || discount;
-
-    console.log("DEBUG priceRule:", priceRule);
-
     const original_total = typeof cart_total_cents === "number" ? cart_total_cents : 0;
 
-    // 1️⃣ Check prerequisites (minimum subtotal)
-    if (priceRule.prerequisite_subtotal_range) {
-      const { greater_than_or_equal_to } = priceRule.prerequisite_subtotal_range;
-      if (greater_than_or_equal_to) {
-        const minSubtotal = Math.round(parseFloat(greater_than_or_equal_to) * 100); // in cents
-        if (original_total < minSubtotal) {
-          return res.status(200).json({
-            valid: false,
-            message: `Cart total must be at least ${minSubtotal / 100} to apply this coupon`,
-            original_total,
-          });
+    // GraphQL query to fetch discount code and price rule
+    const query = `
+      query DiscountCodeLookup($code: String!) {
+        discountCode(code: $code) {
+          code
+          id
+          usageCount
+          priceRule {
+            id
+            valueType
+            valueV2 {
+              amount
+              currencyCode
+            }
+            usageLimit
+            customerSelection
+            prerequisiteSubtotalRange {
+              greaterThanOrEqualTo
+            }
+          }
         }
+      }
+    `;
+
+    const response = await fetch(`https://${SHOP}/admin/api/2025-10/graphql.json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": ADMIN_TOKEN,
+      },
+      body: JSON.stringify({ query, variables: { code } }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Shopify API error: ${response.status} ${text}`);
+    }
+
+    const data = await response.json();
+    const discount = data.data.discountCode;
+
+    if (!discount) {
+      return res.status(200).json({ valid: false, message: "Discount code not found" });
+    }
+
+    const priceRule = discount.priceRule || {};
+    let amount = 0;
+
+    // 1️⃣ Check prerequisites (minimum subtotal)
+    if (priceRule.prerequisiteSubtotalRange?.greaterThanOrEqualTo) {
+      const minSubtotal = Math.round(parseFloat(priceRule.prerequisiteSubtotalRange.greaterThanOrEqualTo) * 100);
+      if (original_total < minSubtotal) {
+        return res.status(200).json({
+          valid: false,
+          message: `Cart total must be at least ${minSubtotal / 100} to apply this coupon`,
+          original_total,
+        });
       }
     }
 
     // 2️⃣ Check usage limit
-    if (typeof priceRule.usage_limit === "number") {
-      const used = discount.usage_count || 0;
-      if (used >= priceRule.usage_limit) {
+    if (typeof priceRule.usageLimit === "number") {
+      const used = discount.usageCount || 0;
+      if (used >= priceRule.usageLimit) {
         return res.status(200).json({
           valid: false,
           message: "Discount usage limit reached",
           usage_count: used,
-          usage_limit: priceRule.usage_limit,
+          usage_limit: priceRule.usageLimit,
         });
       }
     }
 
     // 3️⃣ Calculate discount amount (always positive)
-    let amount = 0;
-    if (priceRule.value_type === "percentage" && priceRule.value) {
-      const pct = Math.abs(parseFloat(priceRule.value)); // percentage
+    if (priceRule.valueType === "PERCENTAGE" && priceRule.valueV2?.amount) {
+      const pct = parseFloat(priceRule.valueV2.amount); // valueV2 is always positive
       amount = Math.round(original_total * (pct / 100));
-    } else if (priceRule.value_type === "fixed_amount" && priceRule.value) {
-      const fixed = Math.abs(Math.round(parseFloat(priceRule.value) * 100));
-      amount = Math.min(fixed, original_total);
-    } else if (discount.amount) {
-      const fixed = Math.abs(Math.round(parseFloat(discount.amount) * 100));
+    } else if (priceRule.valueType === "FIXED_AMOUNT" && priceRule.valueV2?.amount) {
+      const fixed = Math.round(parseFloat(priceRule.valueV2.amount) * 100); // cents
       amount = Math.min(fixed, original_total);
     }
 
     const new_total = Math.max(0, original_total - amount);
 
-    // ✅ Return structured response
     return res.status(200).json({
       valid: true,
       discount,
       priceRule,
-      amount,          // positive number in cents
+      amount,
       original_total,
       new_total,
     });
