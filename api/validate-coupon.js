@@ -10,6 +10,7 @@ export default async function handler(req, res) {
     .map(s => s.trim())
     .filter(Boolean);
 
+  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     const allowOrigin = ALLOW_ALL ? "*" : (allowedOrigins.includes(origin) ? origin : allowedOrigins[0] || "");
     res.setHeader("Access-Control-Allow-Origin", allowOrigin || "*");
@@ -30,7 +31,7 @@ export default async function handler(req, res) {
     return res.status(400).json({ valid: false, message: "No coupon code provided" });
   }
 
-  const SHOP = process.env.SHOP_NAME;
+  const SHOP = process.env.SHOP_NAME; // e.g., your-shop.myshopify.com
   const ADMIN_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
   if (!SHOP || !ADMIN_TOKEN) {
     console.error("Missing env vars SHOP_NAME or SHOPIFY_ACCESS_TOKEN");
@@ -52,21 +53,24 @@ export default async function handler(req, res) {
       const discount = data.discount_code || data;
       const priceRule = discount.price_rule || discount;
 
-      let amount = null;
+      let amount = 0;
       let original_total = typeof cart_total_cents === "number" ? cart_total_cents : null;
       let new_total = null;
 
       if (priceRule && original_total != null) {
+        // Percentage discount
         if (priceRule.value_type === "percentage" && priceRule.value) {
           const pct = Number(priceRule.value) || 0;
           amount = Math.round(original_total * (pct / 100));
-        } else if (priceRule.value_type === "fixed_amount" && priceRule.value) {
+        }
+        // Fixed amount discount
+        else if (priceRule.value_type === "fixed_amount" && priceRule.value) {
           const fixed = Math.round(Number(priceRule.value) * 100);
           amount = Math.min(fixed, original_total);
         }
-        if (amount != null) {
-          new_total = Math.max(0, original_total - amount);
-        }
+        // Cap amount
+        amount = Math.min(amount, original_total);
+        new_total = Math.max(0, original_total - amount);
       }
 
       return res.status(200).json({
@@ -76,7 +80,6 @@ export default async function handler(req, res) {
         original_total, // cart total in cents before discount
         new_total,      // cart total in cents after discount
       });
-
     } else if (apiRes.status === 404) {
       return res.status(200).json({ valid: false, message: "Discount code not found" });
     } else {
@@ -84,7 +87,6 @@ export default async function handler(req, res) {
       console.error("Shopify returned:", apiRes.status, text);
       return res.status(apiRes.status).json({ valid: false, message: "Shopify API error", details: text });
     }
-
   } catch (err) {
     console.error("Server error validating coupon:", err);
     return res.status(500).json({ valid: false, message: "Server error" });
